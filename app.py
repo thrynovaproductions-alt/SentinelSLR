@@ -2,79 +2,91 @@ import streamlit as st
 from google import genai
 import sqlite3
 import pandas as pd
+from PIL import Image
+from datetime import datetime
 import json
 import os
-from datetime import datetime
-import plotly.graph_objects as px # Better than Matplotlib for Streamlit
+import plotly.graph_objects as px
 
-# --- CONFIG & EVOLUTION ENGINE ---
+# 1. SETUP & CONFIGURATION
+# Access secrets securely in the cloud
+API_KEY = st.secrets["GEMINI_API_KEY"]
+client = genai.Client(api_key=API_KEY)
+
+DB_FILE = "sentinel_slr.db"
 CONFIG_FILE = "sentinel_config.json"
+
+DEFAULT_CONFIG = {
+    "version": 1.1,
+    "rule_stats": {
+        "Avoid chasing vertical moves.": {"wins": 0, "losses": 0},
+        "Check RSI for 70+ levels.": {"wins": 0, "losses": 0}
+    }
+}
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
-        return {"version": 1.0, "rule_stats": {
-            "Avoid chasing vertical moves.": {"wins": 0, "losses": 0, "streak": 0},
-            "Check RSI for 70+ levels.": {"wins": 0, "losses": 0, "streak": 0}
-        }}
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(DEFAULT_CONFIG, f)
     with open(CONFIG_FILE, 'r') as f:
         return json.load(f)
 
-def evolve_rule(rule_name, history_summary):
-    """IMPROVISATION: AI analyzes failures to suggest a better rule"""
-    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-    prompt = f"Rule '{rule_name}' is failing. History: {history_summary}. Suggest a 1-sentence modification to fix this."
-    response = client.models.generate_content(model="gemini-2.0-flash", contents=[prompt])
-    return response.text
+def save_config(config):
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f)
 
-# --- UI HEADER ---
-st.set_page_config(page_title="SENTINEL v2: Evolved", layout="wide", page_icon="🛡️")
-st.title("🛡️ Sentinel SLR: Intelligence Engine")
+# 2. DATABASE INITIALIZATION
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute('''CREATE TABLE IF NOT EXISTS slr_log 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                 timestamp DATETIME, verdict_text TEXT, 
+                 outcome TEXT, rule_applied TEXT)''')
+    conn.commit()
+    conn.close()
 
-tab1, tab2, tab3, tab4 = st.tabs(["📸 Analyst", "📊 Audit", "🧠 Knowledge Map", "🧬 Evolution"])
+init_db()
 
-# --- TAB 1: ANALYST (With Confidence Scoring) ---
+# 3. UI LAYOUT
+st.set_page_config(page_title="🛡️ Evolved Sentinel", layout="wide")
+tab1, tab2, tab3 = st.tabs(["📸 Analyst", "📊 Audit", "🧠 Knowledge Map"])
+
+# --- TAB 1: ANALYST ---
 with tab1:
     config = load_config()
-    img_file = st.camera_input("Scanner")
-    
-    if img_file:
-        # Selection logic: Pick rule with highest Win Rate + lowest Streak
-        best_rule = max(config['rule_stats'], key=lambda x: (config['rule_stats'][x]['wins'] + 1) / (config['rule_stats'][x]['losses'] + 1))
-        
-        if st.button(f"Analyze with {best_rule}"):
-            # IMPROVISATION: Prompting for Structured JSON
-            prompt = f"""
-            Rule: {best_rule}
-            Analyze this chart. Output as:
-            VERDICT: [BUY/SELL/WAIT]
-            CONFIDENCE: [0-100%]
-            REASONING: [Short bullet points]
-            """
-            # (AI Call logic here...)
-            st.success("Analysis Complete. Logged to Database.")
+    st.caption(f"Intelligence v{config['version']}")
+    img_file = st.file_uploader("Upload or Capture Chart", type=['jpg', 'png', 'jpeg'])
 
-# --- TAB 3: KNOWLEDGE MAP (Upgraded to Plotly) ---
+    if img_file and st.button("🚀 Analyze"):
+        # Selection logic for best rule
+        rules = config['rule_stats']
+        best_rule = max(rules, key=lambda x: (rules[x]['wins'] + 1) / (rules[x]['wins'] + rules[x]['losses'] + 1))
+        
+        image = Image.open(img_file)
+        prompt = f"System Rule: {best_rule}\nAnalyze this chart in the Sentinel Verdict format."
+        
+        # Call Gemini
+        response = client.models.generate_content(model="gemini-2.0-flash", contents=[prompt, image])
+        st.markdown(response.text)
+
+        # Log to DB
+        conn = sqlite3.connect(DB_FILE)
+        conn.execute("INSERT INTO slr_log (timestamp, verdict_text, rule_applied) VALUES (?, ?, ?)",
+                     (datetime.now().strftime("%Y-%m-%d %H:%M"), response.text, best_rule))
+        conn.commit()
+        conn.close()
+
+# --- TAB 3: KNOWLEDGE MAP ---
 with tab3:
-    st.subheader("Neural Rule Network")
-    # IMPROVISATION: Plotly Scatter for 'Rule Gravity'
-    # High win rate = Green, High usage = Large size
+    st.subheader("Performance Gravity")
     df_rules = pd.DataFrame([
         {"rule": k, "wins": v['wins'], "losses": v['losses'], "total": v['wins']+v['losses']} 
         for k, v in config['rule_stats'].items()
     ])
     df_rules['win_rate'] = (df_rules['wins'] / df_rules['total']).fillna(0)
     
+    # Modern Plotly visualization
     fig = px.scatter(df_rules, x="win_rate", y="total", size="total", color="win_rate",
                      hover_name="rule", color_continuous_scale="RdYlGn",
-                     title="Rule Performance Gravity")
+                     range_x=[0, 1])
     st.plotly_chart(fig, use_container_width=True)
-
-# --- TAB 4: EVOLUTION (The New Feature) ---
-with tab4:
-    st.subheader("Rule Evolution Lab")
-    for rule, stats in config['rule_stats'].items():
-        if stats['losses'] > stats['wins'] and stats['total'] > 3:
-            st.warning(f"⚠️ Rule '{rule}' is underperforming.")
-            if st.button(f"Evolve: {rule[:20]}..."):
-                new_rule = evolve_rule(rule, "3 consecutive losses in overbought conditions")
-                st.info(f"Suggested Modification: {new_rule}")
