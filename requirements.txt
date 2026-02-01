@@ -2,6 +2,4 @@ streamlit
 google-genai
 pandas
 pillow
-networkx
-matplotlib
 plotly
